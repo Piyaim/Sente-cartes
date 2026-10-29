@@ -2,6 +2,8 @@
   {
     "id": "auvergne-rhone-alpes",
     "nom": "Auvergne-Rhône-Alpes",
-    "bbox": [2.00, 44.05, 7.25, 46.85]
+    "bbox": [2.00, 44.05, 7.25, 46.85],
+    "departements": ["01", "03", "07", "15", "26", "38", "42", "43", "63", "69", "73", "74"],
+    "osm": ["europe/france/rhone-alpes", "europe/france/auvergne"]
   }
 ]

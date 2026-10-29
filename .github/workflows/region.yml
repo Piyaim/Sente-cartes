@@ -1,5 +1,6 @@
-# Découpe une région dans la carte quotidienne Protomaps (données OpenStreetMap)
-# et la publie, avec le catalogue, dans la version GitHub « regions ».
+# Fabrique une région pour Sente et la publie, avec le catalogue, dans la version GitHub « regions » :
+#   - la carte : découpe de la carte quotidienne Protomaps (données OpenStreetMap) ;
+#   - la recherche : index des adresses (Base Adresse Nationale) et des lieux (OpenStreetMap).
 # Lancement manuel : onglet Actions → « Région » → Run workflow.
 name: Région
 
@@ -12,8 +13,13 @@ on:
         options:
           - auvergne-rhone-alpes
         default: auvergne-rhone-alpes
+      contenu:
+        description: "Ce qu'il faut fabriquer"
+        type: choice
+        options: ["tout", "carte", "recherche"]
+        default: "tout"
       zoom_max:
-        description: "Zoom maximal (14 recommandé ; 15 double environ la taille)"
+        description: "Zoom maximal de la carte (14 recommandé ; 15 double environ la taille)"
         type: choice
         options: ["14", "15", "13"]
         default: "14"
@@ -28,16 +34,30 @@ concurrency:
 jobs:
   region:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       GH_TOKEN: ${{ github.token }}
       REGION: ${{ inputs.region }}
       ZOOM_MAX: ${{ inputs.zoom_max }}
+      CARTE: ${{ inputs.contenu != 'recherche' }}
+      RECHERCHE: ${{ inputs.contenu != 'carte' }}
     steps:
       - name: Récupérer le dépôt
         uses: actions/checkout@v7
 
+      - name: Lire la définition de la région
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_ENV"
+          import json, os
+          r = [x for x in json.load(open("regions.json")) if x["id"] == os.environ["REGION"]][0]
+          print("BBOX=" + ",".join(str(v) for v in r["bbox"]))
+          print("DEPARTEMENTS=" + " ".join(r["departements"]))
+          print("OSM=" + " ".join(r["osm"]))
+          EOF
+
+      # ------------------------------------------------------------------ carte
       - name: Installer l'outil pmtiles
+        if: env.CARTE == 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/pmtiles"
           gh release download --repo protomaps/go-pmtiles --pattern '*Linux_x86_64.tar.gz' --dir "$RUNNER_TEMP/pmtiles"
@@ -45,6 +65,7 @@ jobs:
           echo "$RUNNER_TEMP/pmtiles" >> "$GITHUB_PATH"
 
       - name: Trouver la dernière carte quotidienne Protomaps
+        if: env.CARTE == 'true'
         run: |
           for i in 0 1 2 3 4 5 6 7; do
             jour=$(date -u -d "-$i day" +%Y%m%d)
@@ -57,28 +78,80 @@ jobs:
           echo "::error::Aucune carte Protomaps trouvée sur les 8 derniers jours."
           exit 1
 
-      - name: Découper la région
+      - name: Découper la carte
+        if: env.CARTE == 'true'
         run: |
-          bbox=$(python3 -c "import json,os; r=[x for x in json.load(open('regions.json')) if x['id']==os.environ['REGION']][0]; print(','.join(str(v) for v in r['bbox']))")
-          echo "Emprise : $bbox, zoom max : $ZOOM_MAX"
+          echo "Emprise : $BBOX, zoom max : $ZOOM_MAX"
           pmtiles extract "https://build.protomaps.com/$SOURCE_JOUR.pmtiles" "$REGION.pmtiles" \
-            --bbox="$bbox" --maxzoom="$ZOOM_MAX" --download-threads=4
+            --bbox="$BBOX" --maxzoom="$ZOOM_MAX" --download-threads=4
           pmtiles show "$REGION.pmtiles" | head -20
-          taille=$(stat -c %s "$REGION.pmtiles")
-          echo "Taille : $((taille / 1024 / 1024)) Mo"
-          if [ "$taille" -gt 2040109465 ]; then
-            echo "::error::Fichier trop gros pour une version GitHub (limite 2 Go). Relancer avec un zoom maximal plus bas."
-            exit 1
-          fi
+
+      # ------------------------------------------------------------------ recherche
+      - name: Installer osmium
+        if: env.RECHERCHE == 'true'
+        run: sudo apt-get update -q && sudo apt-get install -y -q osmium-tool
+
+      - name: Télécharger les adresses (Base Adresse Nationale)
+        if: env.RECHERCHE == 'true'
+        run: |
+          mkdir -p ban
+          for d in $DEPARTEMENTS; do
+            curl -sfL -o "ban/adresses-$d.csv.gz" "https://adresse.data.gouv.fr/data/ban/adresses/latest/csv/adresses-$d.csv.gz" \
+              || curl -sfL -o "ban/adresses-$d.csv.gz" "https://adresse.data.gouv.fr/data/ban/adresses/latest/csv-bal/adresses-$d.csv.gz" \
+              || { echo "::error::Adresses du département $d introuvables."; exit 1; }
+          done
+          ls -la ban
+
+      - name: Télécharger et filtrer les lieux (OpenStreetMap)
+        if: env.RECHERCHE == 'true'
+        run: |
+          : > lieux.geojsonseq
+          for zone in $OSM; do
+            nom=$(basename "$zone")
+            curl -sfL -o "$nom.osm.pbf" "https://download.geofabrik.de/$zone-latest.osm.pbf"
+            osmium tags-filter "$nom.osm.pbf" \
+              nwr/amenity nwr/shop nwr/tourism nwr/place \
+              nwr/leisure=park,sports_centre,swimming_pool,stadium \
+              nwr/railway=station,halt nwr/aerialway=station n/natural=peak \
+              -o "$nom.filtre.osm.pbf" --overwrite
+            osmium export "$nom.filtre.osm.pbf" -f geojsonseq --geometry-types=point,polygon \
+              -a type,id -o "$nom.geojsonseq" --overwrite
+            cat "$nom.geojsonseq" >> lieux.geojsonseq
+            rm -f "$nom.osm.pbf" "$nom.filtre.osm.pbf" "$nom.geojsonseq"
+          done
+          wc -l lieux.geojsonseq
+
+      - name: Construire l'index de recherche
+        if: env.RECHERCHE == 'true'
+        run: |
+          python3 scripts/recherche.py --region "$REGION" --ban ban --osm lieux.geojsonseq --sortie "$REGION.recherche.db"
+          echo "RECHERCHE_JOUR=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------ publication
+      - name: Vérifier les tailles (limite GitHub de 2 Go par fichier)
+        run: |
+          for f in "$REGION.pmtiles" "$REGION.recherche.db"; do
+            [ -f "$f" ] || continue
+            taille=$(stat -c %s "$f")
+            echo "$f : $((taille / 1024 / 1024)) Mo"
+            if [ "$taille" -gt 2040109465 ]; then
+              echo "::error::$f dépasse 2 Go. Pour la carte, relancer avec un zoom maximal plus bas."
+              exit 1
+            fi
+          done
 
       - name: Mettre à jour le catalogue
         run: |
           gh release view regions > /dev/null 2>&1 || gh release create regions \
             --title "Régions" \
-            --notes "Régions téléchargeables par Sente. Données © les contributeurs d'OpenStreetMap, licence ODbL ; découpe de la carte Protomaps."
+            --notes "Régions téléchargeables par Sente. Carte et lieux : © les contributeurs d'OpenStreetMap, licence ODbL ; carte découpée dans Protomaps. Adresses : Base Adresse Nationale, Licence Ouverte 2.0. L'index de recherche est publié sous licence ODbL."
           gh release download regions --pattern catalogue.json --dir ancien 2>/dev/null || true
           python3 scripts/catalogue.py ancien/catalogue.json catalogue.json
           cat catalogue.json
 
       - name: Publier
-        run: gh release upload regions "$REGION.pmtiles" catalogue.json --clobber
+        run: |
+          fichiers="catalogue.json"
+          [ -f "$REGION.pmtiles" ] && fichiers="$fichiers $REGION.pmtiles"
+          [ -f "$REGION.recherche.db" ] && fichiers="$fichiers $REGION.recherche.db"
+          gh release upload regions $fichiers --clobber

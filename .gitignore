@@ -1,5 +1,9 @@
 .DS_Store
 *.pmtiles
+*.recherche.db
+*.osm.pbf
+*.geojsonseq
+ban/
 ancien/
 catalogue.json
 
@@ -8,3 +12,4 @@ catalogue.json
 *.jks
 *.keystore
 *.b64
+__pycache__/
