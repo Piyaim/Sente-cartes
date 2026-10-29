@@ -1,0 +1,10 @@
+.DS_Store
+*.pmtiles
+ancien/
+catalogue.json
+
+# Clés : ne jamais les versionner
+*.p12
+*.jks
+*.keystore
+*.b64

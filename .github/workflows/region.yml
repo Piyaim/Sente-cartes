@@ -1,0 +1,84 @@
+# Découpe une région dans la carte quotidienne Protomaps (données OpenStreetMap)
+# et la publie, avec le catalogue, dans la version GitHub « regions ».
+# Lancement manuel : onglet Actions → « Région » → Run workflow.
+name: Région
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Région à fabriquer"
+        type: choice
+        options:
+          - auvergne-rhone-alpes
+        default: auvergne-rhone-alpes
+      zoom_max:
+        description: "Zoom maximal (14 recommandé ; 15 double environ la taille)"
+        type: choice
+        options: ["14", "15", "13"]
+        default: "14"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: regions
+  cancel-in-progress: false
+
+jobs:
+  region:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REGION: ${{ inputs.region }}
+      ZOOM_MAX: ${{ inputs.zoom_max }}
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v7
+
+      - name: Installer l'outil pmtiles
+        run: |
+          mkdir -p "$RUNNER_TEMP/pmtiles"
+          gh release download --repo protomaps/go-pmtiles --pattern '*Linux_x86_64.tar.gz' --dir "$RUNNER_TEMP/pmtiles"
+          tar -xzf "$RUNNER_TEMP"/pmtiles/*.tar.gz -C "$RUNNER_TEMP/pmtiles"
+          echo "$RUNNER_TEMP/pmtiles" >> "$GITHUB_PATH"
+
+      - name: Trouver la dernière carte quotidienne Protomaps
+        run: |
+          for i in 0 1 2 3 4 5 6 7; do
+            jour=$(date -u -d "-$i day" +%Y%m%d)
+            if curl -sfI "https://build.protomaps.com/$jour.pmtiles" > /dev/null; then
+              echo "SOURCE_JOUR=$jour" >> "$GITHUB_ENV"
+              echo "Carte source : $jour"
+              exit 0
+            fi
+          done
+          echo "::error::Aucune carte Protomaps trouvée sur les 8 derniers jours."
+          exit 1
+
+      - name: Découper la région
+        run: |
+          bbox=$(python3 -c "import json,os; r=[x for x in json.load(open('regions.json')) if x['id']==os.environ['REGION']][0]; print(','.join(str(v) for v in r['bbox']))")
+          echo "Emprise : $bbox, zoom max : $ZOOM_MAX"
+          pmtiles extract "https://build.protomaps.com/$SOURCE_JOUR.pmtiles" "$REGION.pmtiles" \
+            --bbox="$bbox" --maxzoom="$ZOOM_MAX" --download-threads=4
+          pmtiles show "$REGION.pmtiles" | head -20
+          taille=$(stat -c %s "$REGION.pmtiles")
+          echo "Taille : $((taille / 1024 / 1024)) Mo"
+          if [ "$taille" -gt 2040109465 ]; then
+            echo "::error::Fichier trop gros pour une version GitHub (limite 2 Go). Relancer avec un zoom maximal plus bas."
+            exit 1
+          fi
+
+      - name: Mettre à jour le catalogue
+        run: |
+          gh release view regions > /dev/null 2>&1 || gh release create regions \
+            --title "Régions" \
+            --notes "Régions téléchargeables par Sente. Données © les contributeurs d'OpenStreetMap, licence ODbL ; découpe de la carte Protomaps."
+          gh release download regions --pattern catalogue.json --dir ancien 2>/dev/null || true
+          python3 scripts/catalogue.py ancien/catalogue.json catalogue.json
+          cat catalogue.json
+
+      - name: Publier
+        run: gh release upload regions "$REGION.pmtiles" catalogue.json --clobber
