@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Vérification avant chaque « git push » : bloque l'envoi si un commit contient une donnée sensible.
+#
+# Ce qui est cherché, dans les commits qui partent (pas seulement le dernier) :
+#   - des fichiers à ne jamais publier : clés de signature, fichiers .env, APK, cartes et bases ;
+#   - des fichiers de plus de 1 Mo ;
+#   - dans le texte ajouté : clés privées, jetons GitHub ou AWS, mots de passe écrits en clair,
+#     longues chaînes base64 (une clé encodée, par exemple) ;
+#   - les mots de votre liste personnelle (adresse e-mail, nom, adresse…), dans le texte et dans
+#     l'auteur des commits. Cette liste n'est jamais publiée : ~/.config/sente/interdits.txt,
+#     un mot ou une expression par ligne.
+#
+# Installation, une fois par dossier : git config core.hooksPath .githooks
+# Vérifier tout l'historique déjà publié : bash .githooks/pre-push --historique
+# En cas de fausse alerte vérifiée à l'œil : git push --no-verify (à éviter).
+
+set -u
+ZERO=0000000000000000000000000000000000000000
+LISTE_PERSO="${HOME}/.config/sente/interdits.txt"
+TAILLE_MAX=$((1024 * 1024))
+FICHIERS_INTERDITS='(\.(p12|pfx|jks|keystore|pem|key|b64|apk|aab|pmtiles|tar|tgz|zip|db|sqlite|osm\.pbf)$|(^|/)\.env($|\.)|(^|/)(id_rsa|id_ed25519|local\.properties)$)'
+TEXTE_INTERDIT='(-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,}|AKIA[0-9A-Z]{16}|(PASSWORD|PASSWD|MOT_DE_PASSE|SECRET|TOKEN)[A-Z_]*[[:space:]]*[=:][[:space:]]*[^[:space:]${][^[:space:]]{5,}|[A-Za-z0-9+/]{200,}={0,2})'
+
+problemes=0
+signaler() {
+    echo "  ✗ $1" >&2
+    problemes=$((problemes + 1))
+}
+
+verifier_commits() {
+    local commits="$1"
+    [ -z "$commits" ] && return
+    local perso=""
+    if [ -f "$LISTE_PERSO" ]; then
+        perso=$(grep -v '^[[:space:]]*$' "$LISTE_PERSO" | grep -v '^#')
+    fi
+
+    for commit in $commits; do
+        local court
+        court=$(git rev-parse --short "$commit")
+
+        # Fichiers ajoutés ou modifiés : nom et taille.
+        while IFS= read -r fichier; do
+            [ -z "$fichier" ] && continue
+            if echo "$fichier" | grep -Eiq "$FICHIERS_INTERDITS"; then
+                signaler "$court : fichier interdit « $fichier »"
+            fi
+            local taille
+            taille=$(git cat-file -s "$commit:$fichier" 2>/dev/null || echo 0)
+            if [ "$taille" -gt "$TAILLE_MAX" ]; then
+                signaler "$court : « $fichier » pèse $((taille / 1024)) Ko (plus de 1 Mo)"
+            fi
+        done < <(git diff-tree --no-commit-id --name-only -r --diff-filter=AM --root "$commit")
+
+        # Texte ajouté par le commit (lignes « + » du diff, fichiers texte seulement).
+        local ajouts
+        ajouts=$(git show --format= --no-color --unified=0 --diff-filter=AM "$commit" | grep '^+' | grep -v '^+++')
+        if echo "$ajouts" | grep -Eq "$TEXTE_INTERDIT"; then
+            while IFS= read -r trouve; do
+                signaler "$court : secret probable « ${trouve:0:24}… »"
+            done < <(echo "$ajouts" | grep -Eo "$TEXTE_INTERDIT" | head -3)
+        fi
+
+        # Liste personnelle : dans le texte ajouté et dans l'auteur du commit.
+        if [ -n "$perso" ]; then
+            local identite
+            identite=$(git log -1 --format='%an %ae %cn %ce' "$commit")
+            while IFS= read -r mot; do
+                if echo "$ajouts" | grep -Fiq -- "$mot"; then
+                    signaler "$court : le texte contient un élément de votre liste personnelle"
+                fi
+                if echo "$identite" | grep -Fiq -- "$mot"; then
+                    signaler "$court : l'auteur du commit contient un élément de votre liste personnelle"
+                fi
+            done <<< "$perso"
+        fi
+    done
+}
+
+if [ "${1:-}" = "--historique" ]; then
+    echo "Vérification de tout l'historique…" >&2
+    verifier_commits "$(git rev-list --all)"
+else
+    # Git fournit une ligne par référence envoyée : <locale> <sha local> <distante> <sha distant>.
+    while read -r _ref_locale sha_local _ref_distante sha_distant; do
+        [ "$sha_local" = "$ZERO" ] && continue # suppression d'une branche ou d'une étiquette
+        if [ "$sha_distant" = "$ZERO" ]; then
+            commits=$(git rev-list "$sha_local" --not --remotes)
+        else
+            commits=$(git rev-list "$sha_distant..$sha_local")
+        fi
+        verifier_commits "$commits"
+    done
+fi
+
+if [ "$problemes" -gt 0 ]; then
+    echo "" >&2
+    echo "ENVOI BLOQUÉ : $problemes problème(s) ci-dessus. Rien n'est parti sur GitHub." >&2
+    echo "Retirez le fichier ou le texte du commit, puis recommencez." >&2
+    exit 1
+fi
+[ "${1:-}" = "--historique" ] && echo "Historique propre : aucune donnée sensible trouvée." >&2
+exit 0
