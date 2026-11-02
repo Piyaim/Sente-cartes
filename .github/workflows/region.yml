@@ -1,7 +1,8 @@
 # Fabrique une région pour Sente et la publie, avec le catalogue, dans la version GitHub « regions » :
 #   - la carte : découpe de la carte quotidienne Protomaps (données OpenStreetMap) ;
 #   - la recherche : index des adresses (Base Adresse Nationale) et des lieux (OpenStreetMap) ;
-#   - le routage : tuiles de calcul d'itinéraire Valhalla (OpenStreetMap).
+#   - le routage : tuiles de calcul d'itinéraire Valhalla (OpenStreetMap) ;
+#   - les péages : tarifs des sections payantes (OpenTollData).
 # Lancement manuel : onglet Actions → « Région » → Run workflow.
 name: Région
 
@@ -17,7 +18,7 @@ on:
       contenu:
         description: "Ce qu'il faut fabriquer"
         type: choice
-        options: ["tout", "carte", "recherche", "routage"]
+        options: ["tout", "carte", "recherche", "routage", "peages"]
         default: "tout"
       zoom_max:
         description: "Zoom maximal de la carte (14 recommandé ; 15 double environ la taille)"
@@ -43,6 +44,9 @@ jobs:
       CARTE: ${{ inputs.contenu == 'tout' || inputs.contenu == 'carte' }}
       RECHERCHE: ${{ inputs.contenu == 'tout' || inputs.contenu == 'recherche' }}
       ROUTAGE: ${{ inputs.contenu == 'tout' || inputs.contenu == 'routage' }}
+      PEAGES: ${{ inputs.contenu == 'tout' || inputs.contenu == 'peages' }}
+      # Version figée d'OpenTollData (tarifs des péages, ODbL) : changer cet identifiant pour suivre les nouveaux tarifs.
+      OPENTOLLDATA: "85c5a13b45fba50eb05b99fa2c0553c42b7a4942"
       # Même version que celle intégrée à l'appli (valhalla-mobile 0.6.4) : le format des tuiles change entre versions.
       VALHALLA: "3.9.1"
     steps:
@@ -166,10 +170,20 @@ jobs:
           ls -la "$REGION.routage.tar"
           echo "ROUTAGE_JOUR=$OSM_JOUR" >> "$GITHUB_ENV"
 
+      # ------------------------------------------------------------------ péages
+      - name: Fabriquer le fichier des péages (OpenTollData)
+        if: env.PEAGES == 'true'
+        run: |
+          curl -sfL -o opentolldata.json "https://raw.githubusercontent.com/louis2038/OpenTollData/$OPENTOLLDATA/parse/GLOBAL_networkV4.json"
+          python3 scripts/peages.py --region "$REGION" --bbox "$BBOX" --entree opentolldata.json \
+            --commit "$OPENTOLLDATA" --sortie "$REGION.peages.json" | tee peages.log
+          grep '^PEAGES_JOUR=' peages.log >> "$GITHUB_ENV"
+          rm -f opentolldata.json
+
       # ------------------------------------------------------------------ publication
       - name: Vérifier les tailles (limite GitHub de 2 Go par fichier)
         run: |
-          for f in "$REGION.pmtiles" "$REGION.recherche.db" "$REGION.routage.tar"; do
+          for f in "$REGION.pmtiles" "$REGION.recherche.db" "$REGION.routage.tar" "$REGION.peages.json"; do
             [ -f "$f" ] || continue
             taille=$(stat -c %s "$f")
             echo "$f : $((taille / 1024 / 1024)) Mo"
@@ -194,4 +208,5 @@ jobs:
           [ -f "$REGION.pmtiles" ] && fichiers="$fichiers $REGION.pmtiles"
           [ -f "$REGION.recherche.db" ] && fichiers="$fichiers $REGION.recherche.db"
           [ -f "$REGION.routage.tar" ] && fichiers="$fichiers $REGION.routage.tar"
+          [ -f "$REGION.peages.json" ] && fichiers="$fichiers $REGION.peages.json"
           gh release upload regions $fichiers --clobber

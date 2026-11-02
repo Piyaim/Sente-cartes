@@ -5,7 +5,8 @@ Usage : catalogue.py <ancien catalogue (peut ne pas exister)> <nouveau catalogue
 Variables d'environnement : REGION, GITHUB_REPOSITORY, et selon ce qui vient d'être fabriqué :
   - carte : <REGION>.pmtiles présent, ZOOM_MAX, SOURCE_JOUR ;
   - recherche : <REGION>.recherche.db présent, RECHERCHE_JOUR ;
-  - routage : <REGION>.routage.tar présent, ROUTAGE_JOUR.
+  - routage : <REGION>.routage.tar présent, ROUTAGE_JOUR ;
+  - péages : <REGION>.peages.json présent, PEAGES_JOUR (date des tarifs).
 Ce qui n'a pas été refabriqué est repris de l'ancien catalogue.
 """
 import datetime
@@ -22,6 +23,7 @@ carte = f"{region_id}.pmtiles"
 COMPLEMENTS = {
     "recherche": (f"{region_id}.recherche.db", "RECHERCHE_JOUR"),
     "routage": (f"{region_id}.routage.tar", "ROUTAGE_JOUR"),
+    "peages": (f"{region_id}.peages.json", "PEAGES_JOUR"),
 }
 
 definitions = {r["id"]: r for r in json.load(open("regions.json", encoding="utf-8"))}
@@ -83,7 +85,8 @@ catalogue["genere"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-
 catalogue["attribution"] = (
     "Carte : © les contributeurs d'OpenStreetMap (ODbL), tuiles Protomaps. "
     "Recherche : Base Adresse Nationale (Licence Ouverte 2.0) et OpenStreetMap (ODbL). "
-    "Routage : tuiles Valhalla construites à partir d'OpenStreetMap (ODbL)."
+    "Routage : tuiles Valhalla construites à partir d'OpenStreetMap (ODbL). "
+    "Péages : tarifs OpenTollData (ODbL), indicatifs."
 )
 
 with open(nouveau, "w", encoding="utf-8") as f:
